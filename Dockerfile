@@ -9,9 +9,7 @@ RUN npm install --production
 
 COPY . .
 
-RUN mkdir -p /root/.ollama && ollama serve &  sleep 3 && ollama pull ${OLLAMA_MODEL:-qwen2.5}; pkill ollama || true
-
 EXPOSE 11434 3001
 
 ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["ollama serve & sleep 3 && exec npm start"]
+CMD ["ollama serve & sleep 5 && npm start"]
