@@ -11,4 +11,5 @@ COPY . .
 
 EXPOSE 11434 3001
 
+ENTRYPOINT []
 CMD ["/bin/sh", "-c", "ollama serve & sleep 5 && npm start"]
