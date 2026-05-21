@@ -13,4 +13,5 @@ RUN mkdir -p /root/.ollama && ollama serve &  sleep 3 && ollama pull ${OLLAMA_MO
 
 EXPOSE 11434 3001
 
-CMD sh -c 'ollama serve & sleep 3 && npm start'
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["ollama serve & sleep 3 && exec npm start"]
