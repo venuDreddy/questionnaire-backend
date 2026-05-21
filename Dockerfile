@@ -8,8 +8,10 @@ COPY package*.json ./
 RUN npm install --production
 
 COPY . .
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 11434 3001
 
 ENTRYPOINT []
-CMD ["/bin/sh", "-c", "ollama serve & sleep 5 && npm start"]
+CMD ["/app/entrypoint.sh"]
