@@ -1,9 +1,12 @@
-const express = require('express');
+const express = require("express");
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
 
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: "1mb" }));
+
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen2.5";
 
 const SYSTEM_PROMPT = `You are a personality pattern analyzer.
 
@@ -11,115 +14,247 @@ Rules:
 - This is NOT a scientific psychological assessment.
 - Do NOT diagnose mental disorders.
 - Do NOT claim objective truth.
-- Infer tendencies, motivations, emotional patterns, coping style, social behavior, ethics, accountability, resilience, validation seeking, insecurity handling, conflict handling, empathy, ambition, and decision-making patterns only when supported by answers.
 - Treat answers as signals, not facts.
 - If a questionnaire doesn't measure something clearly, do not invent conclusions.
-- Avoid corporate HR language.
 - Be concise but insightful.
-- Be direct.
 
 Task:
-1. Infer what dimensions the questionnaire appears to evaluate.
+1. Infer personality tendencies from the answers.
 2. Give a score from 0–100.
-
-Scoring philosophy:
-90–100: Strong emotional regulation, accountability, resilience, ethics, self-awareness, adaptability, and balanced decision making.
-75–89: Healthy overall patterns with manageable weaknesses.
-60–74: Mixed strengths and vulnerabilities.
-40–59: Noticeable emotional, behavioral, or coping difficulties.
-20–39: Maladaptive tendencies strongly influencing choices.
-0–19: Severe instability or destructive patterns dominating decisions.
-
-Base score on: consistency, resilience, accountability, ethics, empathy, emotional regulation, insecurity management, social reasoning, handling failure, coping mechanisms, validation dependence, decision quality.
+3. Provide a short summary (1-2 lines).
+4. Provide a mythology character match.
+5. Provide 3-5 analysis bullets.
 
 Output EXACTLY as JSON (no markdown, no text before/after):
 {
   "score": <number 0-100>,
-  "shortDescription": "<10-25 words>",
-  "personalityAnalysis": ["point 1", "point 2", "point 3"],
-  "strengths": ["strength 1", "strength 2", "strength 3"],
-  "weaknesses": ["weakness 1", "weakness 2", "weakness 3"],
-  "behavioralSignals": ["signal 1", "signal 2", "signal 3"],
-  "mythologyCharacter": "<Name + mythology origin>",
-  "reason": "<1-3 lines explaining symbolic similarity>",
-  "archetypeLine": "<One short sentence>"
+  "summary": "<short description>",
+  "mythology": "<Name>",
+  "analysis": ["point 1", "point 2", "point 3"]
 }`;
 
-app.post('/api/evaluate', async (req, res) => {
-  const { responses } = req.body ?? {};
-  if (!Array.isArray(responses) || responses.length === 0) {
-    return res.status(400).json({ error: 'responses must be a non-empty array' });
+const normalizeQuestions = (questions) =>
+  questions.map((item, index) => {
+    if (typeof item === "string") {
+      return { id: `Q${index + 1}`, text: item.trim() };
+    }
+    if (item && typeof item === "object") {
+      const id = item.id || item.key || `Q${index + 1}`;
+      const text = item.question || item.text || item.prompt || "";
+      return { id: String(id).trim(), text: String(text).trim() };
+    }
+    return { id: `Q${index + 1}`, text: String(item ?? "").trim() };
+  });
+
+const getAnswerForQuestion = (answers, questionId, index) => {
+  if (Object.prototype.hasOwnProperty.call(answers, questionId)) {
+    return answers[questionId];
+  }
+  const fallbackId = `Q${index + 1}`;
+  if (Object.prototype.hasOwnProperty.call(answers, fallbackId)) {
+    return answers[fallbackId];
+  }
+  const numericKey = String(index + 1);
+  if (Object.prototype.hasOwnProperty.call(answers, numericKey)) {
+    return answers[numericKey];
+  }
+  return undefined;
+};
+
+const extractJson = (text) => {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      return JSON.parse(trimmed);
+    } catch (error) {
+      return null;
+    }
+  }
+  const match = trimmed.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch (error) {
+    return null;
+  }
+};
+
+const parseModelResponse = (text) => {
+  const json = extractJson(text);
+  if (json && typeof json === "object") {
+    return json;
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: 'OPENAI_API_KEY is not set' });
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const labelPattern = /^(score|summary|mythology|analysis)\b/i;
+
+  let score;
+  let summary = "";
+  let mythology = "";
+  let analysis = [];
+  let current = null;
+
+  for (const line of lines) {
+    const labelMatch = line.match(labelPattern);
+    if (labelMatch) {
+      const label = labelMatch[1].toLowerCase();
+      const [, rest = ""] = line.split(/:\s*/, 2);
+      current = label;
+      if (label === "score") {
+        const scoreMatch =
+          rest.match(/(\d{1,3})/) || line.match(/(\d{1,3})\s*\/\s*100/i);
+        if (scoreMatch) {
+          score = Number(scoreMatch[1]);
+        }
+      } else if (label === "summary") {
+        summary = rest.trim();
+      } else if (label === "mythology") {
+        mythology = rest.trim();
+      } else if (label === "analysis" && rest.trim()) {
+        analysis = [rest.trim()];
+      }
+      continue;
+    }
+
+    if (current === "analysis") {
+      const cleaned = line.replace(/^[-*•]\s*/, "").trim();
+      if (cleaned) {
+        analysis.push(cleaned);
+      }
+    } else if (current === "summary" && line) {
+      summary = summary ? `${summary} ${line}` : line;
+    } else if (!summary && /^summary\b/i.test(line)) {
+      summary = line.replace(/^summary\b[:\-]?\s*/i, "");
+    } else if (!mythology && /^mythology\b/i.test(line)) {
+      mythology = line.replace(/^mythology\b[:\-]?\s*/i, "");
+    }
   }
 
-  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  if (typeof score === "undefined") {
+    const scoreMatch =
+      text.match(/score\s*[:\-]?\s*(\d{1,3})/i) ||
+      text.match(/(\d{1,3})\s*\/\s*100/i);
+    if (scoreMatch) {
+      score = Number(scoreMatch[1]);
+    }
+  }
 
-  const questionnaire = responses
-    .map((item, index) => `${index + 1}. ${item.question}`)
-    .join('\n');
+  return { score, summary, mythology, analysis };
+};
 
-  const answers = responses
-    .map((item, index) => `${index + 1}. ${item.choice}. ${item.answer}`)
-    .join('\n');
+app.post("/analyze", async (req, res) => {
+  const { questions, answers } = req.body ?? {};
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return res
+      .status(400)
+      .json({ error: "questions must be a non-empty array" });
+  }
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) {
+    return res.status(400).json({ error: "answers must be an object" });
+  }
 
-  const userPrompt = `Questionnaire:\n\n${questionnaire}\n\nAnswers:\n\n${answers}`;
+  const normalizedQuestions = normalizeQuestions(questions);
+  const missingQuestions = normalizedQuestions.filter((item) => !item.text);
+  if (missingQuestions.length > 0) {
+    return res.status(400).json({ error: "questions must include text" });
+  }
+
+  const missingAnswers = [];
+  const answerLines = normalizedQuestions.map((item, index) => {
+    const answer = getAnswerForQuestion(answers, item.id, index);
+    if (typeof answer === "undefined") {
+      missingAnswers.push(item.id);
+    }
+    return `${item.id}: ${typeof answer === "undefined" ? "" : String(answer)}`;
+  });
+
+  if (missingAnswers.length > 0) {
+    return res.status(400).json({
+      error: `Missing answers for: ${missingAnswers.join(", ")}`,
+    });
+  }
+
+  const questionLines = normalizedQuestions
+    .map((item) => `${item.id}. ${item.text}`)
+    .join("\n");
+
+  const prompt = `${SYSTEM_PROMPT}\n\nQuestions:\n${questionLines}\n\nAnswers:\n${answerLines.join(
+    "\n",
+  )}`;
 
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.2,
-        max_tokens: 500,
-        response_format: { type: 'json_object' },
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false,
+        options: {
+          temperature: 0.2,
+        },
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
       return res.status(502).json({
-        error: `OpenAI request failed (${response.status}): ${errorText || response.statusText}`,
+        error: `Ollama request failed (${response.status}): ${errorText || response.statusText}`,
       });
     }
 
     const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') {
-      return res.status(502).json({ error: 'OpenAI response missing content' });
+    const content = data?.response;
+    if (typeof content !== "string") {
+      return res.status(502).json({ error: "Ollama response missing content" });
     }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(content);
-    } catch (error) {
-      return res.status(502).json({ error: 'OpenAI response was not valid JSON' });
-    }
-
+    const parsed = parseModelResponse(content);
     const score = Number(parsed?.score);
     if (!Number.isFinite(score) || score < 0 || score > 100) {
-      return res.status(502).json({ error: 'OpenAI response did not match schema' });
+      return res
+        .status(502)
+        .json({ error: "Model response did not match schema" });
+    }
+    if (
+      typeof parsed?.summary !== "string" ||
+      parsed.summary.trim().length === 0
+    ) {
+      return res.status(502).json({ error: "Model response missing summary" });
+    }
+    if (
+      typeof parsed?.mythology !== "string" ||
+      parsed.mythology.trim().length === 0
+    ) {
+      return res
+        .status(502)
+        .json({ error: "Model response missing mythology" });
     }
 
-    return res.json(parsed);
+    const analysis = Array.isArray(parsed.analysis)
+      ? parsed.analysis.filter(
+          (item) => typeof item === "string" && item.trim(),
+        )
+      : [];
+
+    return res.json({
+      score,
+      summary: parsed.summary.trim(),
+      mythology: parsed.mythology.trim(),
+      analysis,
+    });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return res.status(502).json({ error: `Failed to reach OpenAI: ${message}` });
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return res
+      .status(502)
+      .json({ error: `Failed to reach Ollama: ${message}` });
   }
 });
 
 app.listen(port, () => {
   console.log(`AI evaluation server listening on port ${port}`);
 });
-

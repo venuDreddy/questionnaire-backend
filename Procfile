@@ -1,0 +1,1 @@
+web: sh -c 'ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-qwen2.5} && exec npm start'
